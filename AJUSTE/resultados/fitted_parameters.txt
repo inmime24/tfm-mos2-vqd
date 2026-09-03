@@ -1,0 +1,21 @@
+# Parametros Slater-Koster ajustados a CS.bands (MoS2 monocapa, SIESTA/GGA-PBE)
+# RMSE global (11 bandas x 106 k-puntos, camino M-Gamma-K-M) = 0.241 eV
+#
+# Base de orbitales (11): Mo(dxy,dyz,dzx,dx2-y2,3z2-r2) + S1(px,py,pz) + S2(px,py,pz)
+# Todas las energias en eV, referidas a E_F.
+
+e_Mo_a1      = -2.4111   # onsite Mo, orbital 3z2-r2 (simetria a1)
+e_Mo_e       = +1.8644   # onsite Mo, orbitales xy, x2-y2 (simetria e, degenerados)
+e_Mo_e2      = -0.1419   # onsite Mo, orbitales yz, zx (simetria e', degenerados)
+e_S_p_para   = -3.0729   # onsite S, orbitales px, py (en el plano)
+e_S_p_perp   = -3.1427   # onsite S, orbital pz (fuera de plano)
+
+Vpd_sigma    = -1.5740   # Mo-S primeros vecinos 
+Vpd_pi       = +0.9788
+
+Vdd_sigma    = -0.8003   # Mo-Mo primeros vecinos
+Vdd_pi       = +0.1656
+Vdd_delta    = +0.3498
+
+Vpp_sigma    = +0.6541   # S-S primeros vecinos (misma subred)
+Vpp_pi       = -0.2471

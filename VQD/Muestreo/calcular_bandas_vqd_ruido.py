@@ -1,0 +1,328 @@
+"""
+Version con muestreo via Qulacs de calcular_bandas_vqd.py. Se para
+cuando el mejor valor encontrado no mejora en mas de 'mejora_minima' durante
+'paciencia' iteraciones seguidas, con un techo maximo 'maxiter' como red de
+seguridad.
+
+La penalizacion de solapamiento entre estados se mantiene igual.
+
+Guardado incremental identico a calcular_bandas_vqd.py: permite reanudar
+si el trabajo se corta por el limite de tiempo de la cola.
+
+Uso:
+    python3 calcular_bandas_vqd_ruido.py --pkl datos/warmstart_40.pkl \
+        --n-estados 11 --shots 8192 --metodo SPSA \
+        --maxiter 15000 --paciencia 1500 --mejora-minima 1e-3 \
+        --beta 10 --salida resultados/ruido_1_warmstart.json
+"""
+import os
+import time
+import json
+import pickle
+import argparse
+
+import numpy as np
+from scipy.optimize import minimize
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import Statevector
+from qulacs import QuantumState
+from qulacs.gate import H, Sdag
+from qiskit_algorithms.optimizers import SPSA
+
+from ansatz_particula import crear_ansatz
+
+PKL_HAMILTONIANOS = 'datos/hamiltonianos_precalculados.pkl'
+N_ESTADOS = 11
+SHOTS = 4096
+METODO = 'SPSA'
+MAXITER = 15000        # techo de seguridad (iteraciones SPSA = 2*maxiter evaluaciones)
+PACIENCIA = 1500        # iteraciones sin mejora antes de parar
+MEJORA_MINIMA = 1e-3    # mejora minima (eV) para contar como progreso real
+BETA = 10.0
+SALIDA_JSON = 'resultados/bandas_vqd_ruido.json'
+
+
+# Funciones necesarias
+
+
+def construir_circuito(ansatz, n_qubits, parametros):
+    estado_inicial = QuantumCircuit(n_qubits)
+    estado_inicial.x(0)
+    return estado_inicial.compose(ansatz.assign_parameters(parametros))
+
+
+def guardar_progreso(salida_json, resultados_por_punto):
+    os.makedirs(os.path.dirname(salida_json), exist_ok=True)
+    tmp = salida_json + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump({'resultados_por_punto': resultados_por_punto}, f, indent=2)
+    os.replace(tmp, salida_json)
+
+
+# Muestreo via Qulacs 
+
+
+def medir_termino_qulacs(qs_base, soporte, shots):
+    qs = qs_base.copy()
+    qubits_medidos = []
+    for q, p in soporte.items():
+        if p == 'X':
+            H(q).update_quantum_state(qs)
+        elif p == 'Y':
+            Sdag(q).update_quantum_state(qs)
+            H(q).update_quantum_state(qs)
+        qubits_medidos.append(q)
+    resultados = qs.sampling(shots)
+    valor = 0.0
+    for r in resultados:
+        paridad = 1
+        for qi in qubits_medidos:
+            if (r >> qi) & 1:
+                paridad *= -1
+        valor += paridad
+    return valor / shots
+
+
+def evaluar_pauli_con_muestreo(pauli_op, psi_qiskit, shots):
+    N = psi_qiskit.num_qubits
+    qs_base = QuantumState(N)
+    qs_base.load(psi_qiskit.data)
+
+    labels = pauli_op.paulis.to_labels()
+    coeffs = pauli_op.coeffs.real
+
+    valor = 0.0
+    for label, coef in zip(labels, coeffs):
+        soporte = {i: ch for i, ch in enumerate(reversed(label)) if ch != 'I'}
+        if not soporte:
+            valor += coef.real
+            continue
+        valor += coef.real * medir_termino_qulacs(qs_base, soporte, shots)
+    return valor
+
+
+# Optimizacion: 
+
+
+class PresupuestoAgotado(Exception):
+    pass
+
+
+def crear_funcion_costo_con_limite(funcion_costo_base, maxfun):
+    estado = {'contador': 0, 'mejor_valor': np.inf, 'mejor_theta': None}
+
+    def funcion_costo(theta):
+        if estado['contador'] >= maxfun:
+            raise PresupuestoAgotado()
+        estado['contador'] += 1
+        valor = funcion_costo_base(theta)
+        if valor < estado['mejor_valor']:
+            estado['mejor_valor'] = valor
+            estado['mejor_theta'] = np.array(theta)
+        return valor
+
+    return funcion_costo, estado
+
+
+def crear_criterio_parada_spsa(paciencia, mejora_minima):
+    estado = {'mejor_valor': np.inf, 'mejor_theta': None, 'iter_mejor': 0, 'contador': 0}
+
+    def checker(nfev, parametros, valor, stepsize, aceptado):
+        it = nfev // 2
+        estado['contador'] = nfev
+        if valor < estado['mejor_valor'] - mejora_minima:
+            estado['mejor_valor'] = valor
+            estado['mejor_theta'] = np.array(parametros)
+            estado['iter_mejor'] = it
+        return (it - estado['iter_mejor']) >= paciencia
+
+    return checker, estado
+
+
+def optimizar(funcion_costo_base, p0, metodo, maxiter, paciencia=None, mejora_minima=None):
+    t0 = time.time()
+
+    if metodo == 'L-BFGS-B':
+        maxfun = maxiter  
+        funcion_costo, estado = crear_funcion_costo_con_limite(funcion_costo_base, maxfun)
+        try:
+            minimize(funcion_costo, p0, method='L-BFGS-B',
+                     options={'maxfun': maxfun, 'maxiter': maxfun})
+        except PresupuestoAgotado:
+            pass
+        mejor_theta, n_evals = estado['mejor_theta'], estado['contador']
+
+    elif metodo == 'SPSA':
+        checker, estado = crear_criterio_parada_spsa(paciencia, mejora_minima)
+        resultado = SPSA(maxiter=maxiter, termination_checker=checker).minimize(funcion_costo_base, p0)
+        mejor_theta = estado['mejor_theta'] if estado['mejor_theta'] is not None else resultado.x
+        n_evals = estado['contador']
+
+    else:
+        raise ValueError(f"Metodo desconocido: {metodo}")
+
+    tiempo = time.time() - t0
+    return mejor_theta, n_evals, tiempo
+
+
+# Función principal
+
+
+def calcular_bandas_vqd_ruido(pkl_hamiltonianos=PKL_HAMILTONIANOS, n_estados=N_ESTADOS,
+                               shots=SHOTS, metodo=METODO, maxiter=MAXITER,
+                               paciencia=PACIENCIA, mejora_minima=MEJORA_MINIMA,
+                               beta=BETA, salida_json=SALIDA_JSON):
+
+    with open(pkl_hamiltonianos, 'rb') as f:
+        puntos = pickle.load(f)
+
+    N = puntos[0]['H'].shape[0]
+    ansatz = crear_ansatz(N, reps=2, entanglement='full')
+
+    print(f"{len(puntos)} puntos k  |  N={N} qubits  |  shots={shots}  |  metodo={metodo}  |  "
+          f"maxiter={maxiter}  |  paciencia={paciencia}  |  mejora_minima={mejora_minima}  |  beta={beta}\n")
+
+    resultados_por_punto = []
+    punto_parcial = None
+    if os.path.exists(salida_json):
+        with open(salida_json) as f:
+            resultados_por_punto = json.load(f)['resultados_por_punto']
+        if resultados_por_punto and len(resultados_por_punto[-1]['niveles']) < n_estados:
+            punto_parcial = resultados_por_punto.pop()
+            print(f"Reanudando: punto {punto_parcial['indice_punto']} "
+                  f"({punto_parcial['etiqueta']}) tenia {len(punto_parcial['niveles'])}/"
+                  f"{n_estados} niveles -- se completa desde ahi.")
+        else:
+            print(f"Reanudando: {len(resultados_por_punto)} puntos ya completos.")
+
+    indice_inicio = len(resultados_por_punto) if punto_parcial is None else punto_parcial['indice_punto']
+
+    for idx_punto in range(indice_inicio, len(puntos)):
+        punto = puntos[idx_punto]
+        pauli_op, H_matrix, etiqueta = punto['pauli_op'], punto['H'], punto['etiqueta']
+        ev_directo = np.linalg.eigvalsh(0.5 * (H_matrix + H_matrix.conj().T))
+
+        if idx_punto > 0:
+            theta_previo_por_nivel = [np.array(r['theta']) for r in resultados_por_punto[-1]['niveles']]
+            etiqueta_previa = resultados_por_punto[-1]['etiqueta']
+        else:
+            theta_previo_por_nivel = None
+            etiqueta_previa = None
+
+        if punto_parcial is not None and idx_punto == punto_parcial['indice_punto']:
+            niveles_resultado = punto_parcial['niveles']
+            estados_encontrados = [
+                Statevector(construir_circuito(ansatz, N, np.array(r['theta'])))
+                for r in niveles_resultado
+            ]
+            t_inicio_punto = time.time() - punto_parcial.get('tiempo_total_punto_s', 0.0)
+            nivel_inicio = len(niveles_resultado)
+        else:
+            niveles_resultado = []
+            estados_encontrados = []
+            t_inicio_punto = time.time()
+            nivel_inicio = 0
+
+        print(f"--- Punto {idx_punto} ({etiqueta}) ---")
+
+        for nivel in range(nivel_inicio, n_estados):
+
+            def funcion_costo_ruidosa(theta, _estados=estados_encontrados):
+                psi = Statevector(construir_circuito(ansatz, N, theta))
+                energia_ruidosa = evaluar_pauli_con_muestreo(pauli_op, psi, shots)
+                penal = sum(beta * abs(prev.inner(psi)) ** 2 for prev in _estados)
+                return energia_ruidosa + penal
+
+            if theta_previo_por_nivel is not None:
+                p0 = theta_previo_por_nivel[nivel]
+                origen = f'warm_start:{etiqueta_previa}'
+            else:
+                rng = np.random.default_rng(1)
+                p0 = rng.uniform(0, 2 * np.pi, ansatz.num_parameters)
+                origen = 'frio:semilla=1'
+
+            theta_final, n_evals, tiempo_s = optimizar(
+                funcion_costo_ruidosa, p0, metodo, maxiter, paciencia, mejora_minima)
+
+            psi_final = Statevector(construir_circuito(ansatz, N, theta_final))
+            energia_exacta_final = float(psi_final.expectation_value(pauli_op).real)
+            energia_ruidosa_final = evaluar_pauli_con_muestreo(pauli_op, psi_final, shots)
+
+            energia_exacta_ref = float(ev_directo[nivel])
+            error_vs_exacto = abs(energia_exacta_final - energia_exacta_ref)
+            solapamientos_previos = [
+                float(abs(estados_encontrados[j].inner(psi_final)) ** 2)
+                for j in range(len(estados_encontrados))
+            ]
+            solap_max = max(solapamientos_previos) if solapamientos_previos else 0.0
+
+            estados_encontrados.append(psi_final)
+
+            print(f"  nivel {nivel}: energia_exacta={energia_exacta_final:.6f} "
+                  f"(ref={energia_exacta_ref:.6f}) error={error_vs_exacto:.4e} "
+                  f"energia_ruidosa={energia_ruidosa_final:.6f} "
+                  f"solap_max={solap_max:.2e} tiempo={tiempo_s:.1f}s "
+                  f"evals={n_evals} origen={origen}")
+
+            niveles_resultado.append({
+                'nivel': nivel,
+                'energia_exacta_final': energia_exacta_final,
+                'energia_ruidosa_final': energia_ruidosa_final,
+                'energia_exacta_referencia': energia_exacta_ref,
+                'error_vs_exacto': error_vs_exacto,
+                'solapamiento_maximo': solap_max,
+                'theta': theta_final.tolist(),
+                'tiempo_s': tiempo_s,
+                'n_evaluaciones': n_evals,
+                'origen_semilla': origen,
+                'shots': shots,
+                'metodo': metodo,
+                'maxiter': maxiter,
+                'paciencia': paciencia,
+            })
+
+            tiempo_total_punto_parcial = time.time() - t_inicio_punto
+            guardar_progreso(salida_json, resultados_por_punto + [{
+                'indice_punto': idx_punto,
+                'etiqueta': etiqueta,
+                'kcart': list(punto['kcart']),
+                'tiempo_total_punto_s': tiempo_total_punto_parcial,
+                'niveles': niveles_resultado,
+            }])
+
+        tiempo_total_punto = time.time() - t_inicio_punto
+        resultados_por_punto.append({
+            'indice_punto': idx_punto,
+            'etiqueta': etiqueta,
+            'kcart': list(punto['kcart']),
+            'tiempo_total_punto_s': tiempo_total_punto,
+            'niveles': niveles_resultado,
+        })
+        guardar_progreso(salida_json, resultados_por_punto)
+        punto_parcial = None
+        print(f"  Punto {idx_punto} completo en {tiempo_total_punto:.1f}s\n")
+
+    print(f"Barrido completo: {len(resultados_por_punto)} puntos. Guardado en {salida_json}")
+    return resultados_por_punto
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument('--pkl', default=PKL_HAMILTONIANOS)
+    p.add_argument('--n-estados', type=int, default=N_ESTADOS)
+    p.add_argument('--shots', type=int, default=SHOTS)
+    p.add_argument('--metodo', default=METODO, choices=['L-BFGS-B', 'SPSA'])
+    p.add_argument('--maxiter', type=int, default=MAXITER)
+    p.add_argument('--paciencia', type=int, default=PACIENCIA)
+    p.add_argument('--mejora-minima', type=float, default=MEJORA_MINIMA)
+    p.add_argument('--beta', type=float, default=BETA)
+    p.add_argument('--salida', default=SALIDA_JSON)
+    return p.parse_args()
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    calcular_bandas_vqd_ruido(pkl_hamiltonianos=args.pkl, n_estados=args.n_estados,
+                               shots=args.shots, metodo=args.metodo, maxiter=args.maxiter,
+                               paciencia=args.paciencia, mejora_minima=args.mejora_minima,
+                               beta=args.beta, salida_json=args.salida)

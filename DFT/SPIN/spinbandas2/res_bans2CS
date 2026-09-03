@@ -1,0 +1,11 @@
+ta_bands.py mos2.bands --gap --emin -3 --emax 3
+Reading: mos2.bands
+  Fermi level   : -5.001521 eV
+  Spin channels : 2
+  Bands per spin: 57  (total 114 per k-point)
+  k-points      : 106
+  k-path        : M (0.0000)  →  $\Gamma$ (0.6056)  →  K (1.3048)  →  M (1.6544)
+[Spin ↑] Band gap: 1.7377 eV  (direct)  |  VBM = -0.8866 eV at k = 1.30481  |  CBM = 0.8511 eV at k = 1.30481
+[Spin ↓] Band gap: 1.7377 eV  (direct)  |  VBM = -0.8865 eV at k = 1.30481  |  CBM = 0.8512 eV at k = 1.30481
+
+

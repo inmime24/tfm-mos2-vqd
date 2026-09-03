@@ -1,0 +1,39 @@
+scan_energy.py
+Ejecutando a = 3.000
+E = -2513.9014 eV
+Ejecutando a = 3.020
+E = -2514.0858 eV
+Ejecutando a = 3.040
+E = -2514.2419 eV
+Ejecutando a = 3.060
+E = -2514.3716 eV
+Ejecutando a = 3.080
+E = -2514.4763 eV
+Ejecutando a = 3.100
+E = -2514.5574 eV
+Ejecutando a = 3.120
+E = -2514.6164 eV
+Ejecutando a = 3.140
+E = -2514.6545 eV
+Ejecutando a = 3.160
+E = -2514.6731 eV
+Ejecutando a = 3.180
+E = -2514.6732 eV
+Ejecutando a = 3.200
+E = -2514.6562 eV
+Ejecutando a = 3.220
+E = -2514.6232 eV
+Ejecutando a = 3.240
+E = -2514.575 eV
+Ejecutando a = 3.260
+E = -2514.5132 eV
+Ejecutando a = 3.280
+E = -2514.4382 eV
+Ejecutando a = 3.300
+E = -2514.3512 eV
+
+==========================
+a óptimo = 3.1800 Å
+E mínima = -2514.673200 eV
+==========================
+
