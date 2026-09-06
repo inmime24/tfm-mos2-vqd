@@ -1,19 +1,8 @@
 """
-calcular_bandas_vqd_ruido.py
-
-Version CON RUIDO (muestreo via Qulacs) de calcular_bandas_vqd.py. Calcula,
-mediante VQD, los autovalores de un conjunto de puntos k (definido por el
-.pkl de entrada -- ese archivo decide "que puntos"), usando una funcion de
-coste con muestreo real en vez de valor esperado exacto. La penalizacion de
-solapamiento entre estados se mantiene EXACTA (decision ya tomada: solo la
-energia se mide con ruido).
-
-scipy.optimize.minimize NO respeta maxfun de forma fiable con L-BFGS-B
-cuando el gradiente se estima por diferencias finitas (comprobado
-empiricamente: con maxfun=30 se llegaron a hacer mas de 390 llamadas sin
-detenerse). Por eso se usa un mecanismo propio de parada forzada por
-excepcion, que garantiza el presupuesto de evaluaciones exacto para ambos
-optimizadores (L-BFGS-B y SPSA), permitiendo una comparacion justa.
+Version por muestreo via Qulacs de calcular_bandas_vqd.py. Calcula,
+mediante VQD, los autovalores de un conjunto de puntos k definido por el
+.pkl de entrada. La penalizacion de solapamiento entre estados se mantiene
+igual, solo la energia se mide con ruido.
 
 Guardado incremental identico a calcular_bandas_vqd.py: permite reanudar
 si el trabajo se corta por el limite de tiempo de la cola.
@@ -42,15 +31,13 @@ from ansatz_particula import crear_ansatz
 PKL_HAMILTONIANOS = 'datos/hamiltonianos_precalculados.pkl'
 N_ESTADOS = 11
 SHOTS = 4096
-METODO = 'SPSA'   # pendiente de confirmar/ajustar con la prueba comparativa
+METODO = 'SPSA'   
 PRESUPUESTO_EVALS = 3000
 BETA = 10.0
 SALIDA_JSON = 'resultados/bandas_vqd_ruido.json'
 
 
-# ============================================================
-# Utilidades de circuito (identicas a calcular_bandas_vqd.py)
-# ============================================================
+# Funciones auxiliares
 
 def construir_circuito(ansatz, n_qubits, parametros):
     estado_inicial = QuantumCircuit(n_qubits)
@@ -65,10 +52,7 @@ def guardar_progreso(salida_json, resultados_por_punto):
         json.dump({'resultados_por_punto': resultados_por_punto}, f, indent=2)
     os.replace(tmp, salida_json)
 
-
-# ============================================================
-# Muestreo via Qulacs (verificado con un estado de Bell)
-# ============================================================
+# Muestreo via Qulacs 
 
 def medir_termino_qulacs(qs_base, soporte, shots):
     qs = qs_base.copy()
@@ -109,9 +93,7 @@ def evaluar_pauli_con_muestreo(pauli_op, psi_qiskit, shots):
     return valor
 
 
-# ============================================================
-# Optimizacion con presupuesto de evaluaciones garantizado
-# ============================================================
+# Optimizacion
 
 class PresupuestoAgotado(Exception):
     pass
@@ -152,9 +134,7 @@ def optimizar_con_presupuesto(funcion_costo_base, p0, metodo, maxfun):
     return estado['mejor_theta'], estado['contador'], tiempo
 
 
-# ============================================================
-# Orquestador principal (mismo esqueleto que calcular_bandas_vqd.py)
-# ============================================================
+# Función principal
 
 def calcular_bandas_vqd_ruido(pkl_hamiltonianos=PKL_HAMILTONIANOS, n_estados=N_ESTADOS,
                                shots=SHOTS, metodo=METODO, presupuesto_evals=PRESUPUESTO_EVALS,
@@ -217,7 +197,6 @@ def calcular_bandas_vqd_ruido(pkl_hamiltonianos=PKL_HAMILTONIANOS, n_estados=N_E
             def funcion_costo_ruidosa(theta, _estados=estados_encontrados):
                 psi = Statevector(construir_circuito(ansatz, N, theta))
                 energia_ruidosa = evaluar_pauli_con_muestreo(pauli_op, psi, shots)
-                # la penalizacion de solapamiento se mantiene EXACTA (no ruidosa)
                 penal = sum(beta * abs(prev.inner(psi)) ** 2 for prev in _estados)
                 return energia_ruidosa + penal
 
