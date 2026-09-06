@@ -1,19 +1,27 @@
 """
-Version con muestreo via Qulacs de calcular_bandas_vqd.py. Se para
-cuando el mejor valor encontrado no mejora en mas de 'mejora_minima' durante
-'paciencia' iteraciones seguidas, con un techo maximo 'maxiter' como red de
-seguridad.
+calcular_bandas_vqd_ruido.py
 
-La penalizacion de solapamiento entre estados se mantiene igual.
+Version CON RUIDO (muestreo via Qulacs) de calcular_bandas_vqd.py. Calcula,
+mediante VQD, los autovalores de un conjunto de puntos k (definido por el
+.pkl de entrada -- ese archivo decide "que puntos"), usando una funcion de
+coste con muestreo real en vez de valor esperado exacto. La penalizacion de
+solapamiento entre estados se mantiene EXACTA (decision ya tomada: solo la
+energia se mide con ruido).
+
+scipy.optimize.minimize NO respeta maxfun de forma fiable con L-BFGS-B
+cuando el gradiente se estima por diferencias finitas (comprobado
+empiricamente: con maxfun=30 se llegaron a hacer mas de 390 llamadas sin
+detenerse). Por eso se usa un mecanismo propio de parada forzada por
+excepcion, que garantiza el presupuesto de evaluaciones exacto para ambos
+optimizadores (L-BFGS-B y SPSA), permitiendo una comparacion justa.
 
 Guardado incremental identico a calcular_bandas_vqd.py: permite reanudar
 si el trabajo se corta por el limite de tiempo de la cola.
 
 Uso:
-    python3 calcular_bandas_vqd_ruido.py --pkl datos/warmstart_40.pkl \
-        --n-estados 11 --shots 8192 --metodo SPSA \
-        --maxiter 15000 --paciencia 1500 --mejora-minima 1e-3 \
-        --beta 10 --salida resultados/ruido_1_warmstart.json
+    python3 calcular_bandas_vqd_ruido.py --pkl datos/hamiltonianos_16puntos.pkl \
+        --n-estados 11 --shots 4096 --metodo SPSA --presupuesto 3000 \
+        --beta 10 --salida resultados/bandas_ruido_warmstart.json
 """
 import os
 import time
@@ -34,16 +42,15 @@ from ansatz_particula import crear_ansatz
 PKL_HAMILTONIANOS = 'datos/hamiltonianos_precalculados.pkl'
 N_ESTADOS = 11
 SHOTS = 4096
-METODO = 'SPSA'
-MAXITER = 15000        # techo de seguridad (iteraciones SPSA = 2*maxiter evaluaciones)
-PACIENCIA = 1500        # iteraciones sin mejora antes de parar
-MEJORA_MINIMA = 1e-3    # mejora minima (eV) para contar como progreso real
+METODO = 'SPSA'   # pendiente de confirmar/ajustar con la prueba comparativa
+PRESUPUESTO_EVALS = 3000
 BETA = 10.0
 SALIDA_JSON = 'resultados/bandas_vqd_ruido.json'
 
 
-# Funciones necesarias
-
+# ============================================================
+# Utilidades de circuito (identicas a calcular_bandas_vqd.py)
+# ============================================================
 
 def construir_circuito(ansatz, n_qubits, parametros):
     estado_inicial = QuantumCircuit(n_qubits)
@@ -59,8 +66,9 @@ def guardar_progreso(salida_json, resultados_por_punto):
     os.replace(tmp, salida_json)
 
 
-# Muestreo via Qulacs 
-
+# ============================================================
+# Muestreo via Qulacs (verificado con un estado de Bell)
+# ============================================================
 
 def medir_termino_qulacs(qs_base, soporte, shots):
     qs = qs_base.copy()
@@ -101,8 +109,9 @@ def evaluar_pauli_con_muestreo(pauli_op, psi_qiskit, shots):
     return valor
 
 
-# Optimizacion: 
-
+# ============================================================
+# Optimizacion con presupuesto de evaluaciones garantizado
+# ============================================================
 
 class PresupuestoAgotado(Exception):
     pass
@@ -124,53 +133,31 @@ def crear_funcion_costo_con_limite(funcion_costo_base, maxfun):
     return funcion_costo, estado
 
 
-def crear_criterio_parada_spsa(paciencia, mejora_minima):
-    estado = {'mejor_valor': np.inf, 'mejor_theta': None, 'iter_mejor': 0, 'contador': 0}
+def optimizar_con_presupuesto(funcion_costo_base, p0, metodo, maxfun):
+    funcion_costo, estado = crear_funcion_costo_con_limite(funcion_costo_base, maxfun)
 
-    def checker(nfev, parametros, valor, stepsize, aceptado):
-        it = nfev // 2
-        estado['contador'] = nfev
-        if valor < estado['mejor_valor'] - mejora_minima:
-            estado['mejor_valor'] = valor
-            estado['mejor_theta'] = np.array(parametros)
-            estado['iter_mejor'] = it
-        return (it - estado['iter_mejor']) >= paciencia
-
-    return checker, estado
-
-
-def optimizar(funcion_costo_base, p0, metodo, maxiter, paciencia=None, mejora_minima=None):
     t0 = time.time()
-
-    if metodo == 'L-BFGS-B':
-        maxfun = maxiter  
-        funcion_costo, estado = crear_funcion_costo_con_limite(funcion_costo_base, maxfun)
-        try:
+    try:
+        if metodo == 'L-BFGS-B':
             minimize(funcion_costo, p0, method='L-BFGS-B',
                      options={'maxfun': maxfun, 'maxiter': maxfun})
-        except PresupuestoAgotado:
-            pass
-        mejor_theta, n_evals = estado['mejor_theta'], estado['contador']
-
-    elif metodo == 'SPSA':
-        checker, estado = crear_criterio_parada_spsa(paciencia, mejora_minima)
-        resultado = SPSA(maxiter=maxiter, termination_checker=checker).minimize(funcion_costo_base, p0)
-        mejor_theta = estado['mejor_theta'] if estado['mejor_theta'] is not None else resultado.x
-        n_evals = estado['contador']
-
-    else:
-        raise ValueError(f"Metodo desconocido: {metodo}")
-
+        elif metodo == 'SPSA':
+            SPSA(maxiter=maxfun // 2).minimize(funcion_costo, p0)
+        else:
+            raise ValueError(f"Metodo desconocido: {metodo}")
+    except PresupuestoAgotado:
+        pass
     tiempo = time.time() - t0
-    return mejor_theta, n_evals, tiempo
+
+    return estado['mejor_theta'], estado['contador'], tiempo
 
 
-# Función principal
-
+# ============================================================
+# Orquestador principal (mismo esqueleto que calcular_bandas_vqd.py)
+# ============================================================
 
 def calcular_bandas_vqd_ruido(pkl_hamiltonianos=PKL_HAMILTONIANOS, n_estados=N_ESTADOS,
-                               shots=SHOTS, metodo=METODO, maxiter=MAXITER,
-                               paciencia=PACIENCIA, mejora_minima=MEJORA_MINIMA,
+                               shots=SHOTS, metodo=METODO, presupuesto_evals=PRESUPUESTO_EVALS,
                                beta=BETA, salida_json=SALIDA_JSON):
 
     with open(pkl_hamiltonianos, 'rb') as f:
@@ -179,8 +166,8 @@ def calcular_bandas_vqd_ruido(pkl_hamiltonianos=PKL_HAMILTONIANOS, n_estados=N_E
     N = puntos[0]['H'].shape[0]
     ansatz = crear_ansatz(N, reps=2, entanglement='full')
 
-    print(f"{len(puntos)} puntos k  |  N={N} qubits  |  shots={shots}  |  metodo={metodo}  |  "
-          f"maxiter={maxiter}  |  paciencia={paciencia}  |  mejora_minima={mejora_minima}  |  beta={beta}\n")
+    print(f"{len(puntos)} puntos k  |  N={N} qubits  |  shots={shots}  |  "
+          f"metodo={metodo}  |  presupuesto={presupuesto_evals} evals/nivel  |  beta={beta}\n")
 
     resultados_por_punto = []
     punto_parcial = None
@@ -230,6 +217,7 @@ def calcular_bandas_vqd_ruido(pkl_hamiltonianos=PKL_HAMILTONIANOS, n_estados=N_E
             def funcion_costo_ruidosa(theta, _estados=estados_encontrados):
                 psi = Statevector(construir_circuito(ansatz, N, theta))
                 energia_ruidosa = evaluar_pauli_con_muestreo(pauli_op, psi, shots)
+                # la penalizacion de solapamiento se mantiene EXACTA (no ruidosa)
                 penal = sum(beta * abs(prev.inner(psi)) ** 2 for prev in _estados)
                 return energia_ruidosa + penal
 
@@ -241,8 +229,8 @@ def calcular_bandas_vqd_ruido(pkl_hamiltonianos=PKL_HAMILTONIANOS, n_estados=N_E
                 p0 = rng.uniform(0, 2 * np.pi, ansatz.num_parameters)
                 origen = 'frio:semilla=1'
 
-            theta_final, n_evals, tiempo_s = optimizar(
-                funcion_costo_ruidosa, p0, metodo, maxiter, paciencia, mejora_minima)
+            theta_final, n_evals, tiempo_s = optimizar_con_presupuesto(
+                funcion_costo_ruidosa, p0, metodo, presupuesto_evals)
 
             psi_final = Statevector(construir_circuito(ansatz, N, theta_final))
             energia_exacta_final = float(psi_final.expectation_value(pauli_op).real)
@@ -277,8 +265,6 @@ def calcular_bandas_vqd_ruido(pkl_hamiltonianos=PKL_HAMILTONIANOS, n_estados=N_E
                 'origen_semilla': origen,
                 'shots': shots,
                 'metodo': metodo,
-                'maxiter': maxiter,
-                'paciencia': paciencia,
             })
 
             tiempo_total_punto_parcial = time.time() - t_inicio_punto
@@ -312,9 +298,7 @@ def parse_args():
     p.add_argument('--n-estados', type=int, default=N_ESTADOS)
     p.add_argument('--shots', type=int, default=SHOTS)
     p.add_argument('--metodo', default=METODO, choices=['L-BFGS-B', 'SPSA'])
-    p.add_argument('--maxiter', type=int, default=MAXITER)
-    p.add_argument('--paciencia', type=int, default=PACIENCIA)
-    p.add_argument('--mejora-minima', type=float, default=MEJORA_MINIMA)
+    p.add_argument('--presupuesto', type=int, default=PRESUPUESTO_EVALS)
     p.add_argument('--beta', type=float, default=BETA)
     p.add_argument('--salida', default=SALIDA_JSON)
     return p.parse_args()
@@ -323,6 +307,6 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
     calcular_bandas_vqd_ruido(pkl_hamiltonianos=args.pkl, n_estados=args.n_estados,
-                               shots=args.shots, metodo=args.metodo, maxiter=args.maxiter,
-                               paciencia=args.paciencia, mejora_minima=args.mejora_minima,
-                               beta=args.beta, salida_json=args.salida)
+                               shots=args.shots, metodo=args.metodo,
+                               presupuesto_evals=args.presupuesto, beta=args.beta,
+                               salida_json=args.salida)

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p ilk
 #SBATCH --mem-per-cpu=1G
-#SBATCH --time=70:00:00
+#SBATCH --time=12:00:00
 #SBATCH -o ruido_8_shots8192_K_%j.out
 #SBATCH -e ruido_8_shots8192_K_%j.err
 
@@ -15,8 +15,6 @@ python3 -u calcular_bandas_vqd_ruido.py \
     --n-estados 11 \
     --shots 8192 \
     --metodo SPSA \
-    --maxiter 15000 \
-    --paciencia 1500 \
-    --mejora-minima 1e-3 \
+    --presupuesto 3000 \
     --beta 10 \
     --salida resultados/ruido_8_shots8192_K.json
